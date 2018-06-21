@@ -1,1 +1,3 @@
 passwords.py
+*.pyc
+__pycache__/*

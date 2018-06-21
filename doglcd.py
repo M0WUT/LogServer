@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import spidev, atexit, time
+import spidev, time
 import RPi.GPIO as GPIO
 
 DOG_LCD_M081 = 1
@@ -88,7 +88,7 @@ class DogLCD():
 			return False
 
 		self.contrast = contrast
-		
+
 		if not enable_hw_spi:
 			GPIO.setup(self.lcdCSB,GPIO.OUT);
 			GPIO.output(self.lcdCSB,GPIO.HIGH);
@@ -100,6 +100,9 @@ class DogLCD():
 		GPIO.output(self.lcdRS,GPIO.HIGH);
 
 		self.reset()
+		self.clear();
+		self.noCursor();
+		self.home();
 		return True
 
 	def reset(self):
@@ -291,7 +294,8 @@ class DogLCD():
 		# Wait for command to complete
 		self.delayMicroseconds( delay )
 
-	def write(self, string):
+	def write(self, row, col, string):
+		self.setCursor(row, col);
 		string = str( string )
 		for char in string:
 			self.writeChar(ord(char))
@@ -302,4 +306,3 @@ class DogLCD():
 	def delay(self, delay):
 		time.sleep(delay/1000)
 
-atexit.register(lambda: GPIO.cleanup())
