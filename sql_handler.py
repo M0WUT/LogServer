@@ -9,9 +9,10 @@ import json
 import location
 
 
-#Downloads any new QSLs from LoTW and updates log
+#Downloads any new QSLs from LoTW and updates log, sets ClublogQsoUploadStatus back to 'N' for any records changed
 #return		0 - Success
 #		1 - SQL Error
+#		2 - LoTW Download Error
 def lotw_download(callsign):
 	#Get last time we synced with LoTW to make more efficient
 	try:
@@ -26,7 +27,12 @@ def lotw_download(callsign):
 	url = "https://lotw.arrl.org/lotwuser/lotwreport.adi"
 	values = {'login' : passwords.LOTW_USERNAME, 'password' : passwords.LOTW_PASSWORD, 'qso_query' : '1', 'qso_qsl' : 'yes', 'qso_qslsince' : lastLotwSync, 'qso_owncall' : callsign}
 
-	log = requests.get(url,values).text
+	result = requests.get(url,values)
+	log = result.text
+	if(result.status_code != 200):
+		print("Error downloading data from LoTW")
+		return 2
+
 	print(log)
 
 #Uploads any new QSOs for 'callsign' to Clublog
@@ -48,7 +54,7 @@ def clublog_upload(callsign):
 		return 1
 
 	c = db.cursor()
-	c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd FROM log WHERE ClublogQsoUploadStatus = 'N' ORDER BY QsoDate, TimeOn")
+	c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd, LotwQslRcvd FROM log WHERE ClublogQsoUploadStatus = 'N' ORDER BY QsoDate, TimeOn")
 	qsos = c.fetchall()
 	if(qsos == ()):
 		print("Nothing to upload to Clublog")
@@ -61,7 +67,7 @@ def clublog_upload(callsign):
 		freq = qso[2]
 		freq = freq.split('.')[0] #Seperate off only the whole number of kHz(the bit before the decimal point)
 		freq = freq[:-3] + '.' + freq[-3:]
-		logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7]))
+		logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <LOTW_QSL_RCVD:1>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7], qso[8]))
 	logfile.close()
 
 	#Now have ADIF file ready for upload to Clublog
@@ -210,8 +216,11 @@ def log_tidy(callsign):
 		for call in callsigns: #I know the helpage says don't iterate but there shouldn't be many
 			url = 'https://clublog.org/dxcc'
 			payload = {'call' : call[0], 'api' : passwords.CLUBLOG_API_KEY, 'full' : '1'}
-			dxcc = requests.get(url, payload).text
-			info = json.loads(dxcc)
+			result = requests.get(url, payload)
+			if(result.status_code != 200):
+				print("Error downloading data from Clublog for callsign {}".format(call))
+				return 2
+			info = json.loads(result.text)
 			if(info['DXCC'] == 0):
 				print("No DXCC found for {}".format(call[0]))
 				errorCode = 2
@@ -222,9 +231,8 @@ def log_tidy(callsign):
 		db.close()
 		return errorCode
 
-
 if __name__ == '__main__':
-	log_tidy("M0WUT")
-	lotw_upload("M0WUT")
+	#log_tidy("M0WUT")
+	#lotw_upload("M0WUT")
 	#clublog_upload("M0WUT")
-	#lotw_download("M0WUT")
+	lotw_download("M0WUT")
