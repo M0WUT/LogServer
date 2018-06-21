@@ -6,7 +6,28 @@ import sys
 import requests
 import subprocess
 import json
+import location
 
+
+#Downloads any new QSLs from LoTW and updates log
+#return		0 - Success
+#		1 - SQL Error
+def lotw_download(callsign):
+	#Get last time we synced with LoTW to make more efficient
+	try:
+		file = open("synctime.txt", "r+")
+		lastLotwSync = file.readline()
+		print("Downloading QSLs for {} since {}".format(callsign, lastLotwSync))
+	except:
+		lastLotwSync = "1945-01-01 00:00:00"
+		file = open("synctime.txt", "w")
+		print("Downloading all QSLs for {}".format(callsign))
+
+	url = "https://lotw.arrl.org/lotwuser/lotwreport.adi"
+	values = {'login' : passwords.LOTW_USERNAME, 'password' : passwords.LOTW_PASSWORD, 'qso_query' : '1', 'qso_qsl' : 'yes', 'qso_qslsince' : lastLotwSync, 'qso_owncall' : callsign}
+
+	log = requests.get(url,values).text
+	print(log)
 
 #Uploads any new QSOs for 'callsign' to Clublog
 #Assumes MySQL database has same name as callsign
@@ -49,7 +70,7 @@ def clublog_upload(callsign):
 	values = {'email' : passwords.CLUBLOG_EMAIL, 'password' : passwords.CLUBLOG_APPLICATION_PASSWORD, 'callsign' : callsign, 'api' : passwords.CLUBLOG_API_KEY}
 	errorCode = requests.post(url, files=files, data=values).status_code
 	if(errorCode == 200):
-		print("Uploaded {} QSOs to Clublog".format(callsign))
+		print("Uploaded QSOs for {} to Clublog".format(callsign))
 		c.execute("UPDATE log SET ClublogQsoUploadStatus = 'Y' WHERE ClublogQsoUploadStatus = 'N'")
 		db.commit()
 		return 0
@@ -76,7 +97,8 @@ def clublog_upload(callsign):
 #		10: Command Syntax Error
 #		11: LoTW Connection Error
 #		12: Error connectiong to SQL database
-#		13: My callsign gives invalid DXCC from Clublog 
+#		13: My callsign gives invalid DXCC from Clublog
+#		14: No LoTW certificate for the callsign
 def lotw_upload(callsign):
 	try:
 		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
@@ -99,7 +121,7 @@ def lotw_upload(callsign):
 		return 0
 
 	for locator in locators: #For each locator
-		print("Uploading callsign from {} in locator {}".format(callsign, locator[0]))
+		print("Uploading log from {} in locator {}".format(callsign, locator[0]))
 		#Get all of the QSOs that haven't been uploaded yet
 		c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd FROM log WHERE LotwQslSent = 'N' AND MyGridSquare = %s ORDER BY QsoDate, TimeOn", (locator[0],))
 		qsos = c.fetchall()
@@ -112,30 +134,30 @@ def lotw_upload(callsign):
 			freq = freq[:-3] + '.' + freq[-3:]
 			logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7]))
 		logfile.close()
-		#logfile now contains an ADIF with the new QSOs to be uploaded, now need to overwrite LotW Locator File so this log gets uploaded with correct locator
-		#Start by requesting my DXCC from Clublog
-		url = 'https://clublog.org/dxcc'
-		payload = {'call' : callsign, 'api' : passwords.CLUBLOG_API_KEY}
-		myDxcc = requests.get(url, payload).text
-		if(myDxcc == 0):
-			print("My Callsign gives invalid DXCC from Clublog")
-			return 13
 
-		#Write station information to LoTW config file
+
+		#logfile now contains an ADIF with the new QSOs to be uploaded, now need to overwrite LotW Locator File so this log gets uploaded with correct locator
+		#Check that my callsign is in the locations dictionary (implies there is a LoTW certificate for it)
+		if(callsign not in location.locations):
+			print("No LoTW Certificate for callsign: {}".format(callsign))
+			return 14
+
+		#Get my CQ Zone, DXCC number and ITU Zone from locations file
+		#and Write station information to LoTW config file
 		locatorFile = open("/home/pi/.tqsl/station_data", "w")
 		locatorFile.write("<StationDataFile>\n")
 		locatorFile.write("  <StationData name=\"test\">\n")
 		locatorFile.write("    <CALL>{}</CALL>\n".format(callsign))
-		locatorFile.write("    <CQZ>0</CQZ>\n")
-		locatorFile.write("    <DXCC>{}</DXCC>\n".format(myDxcc))
+		locatorFile.write("    <CQZ>{}</CQZ>\n".format(location.locations[callsign].cqz))
+		locatorFile.write("    <DXCC>{}</DXCC>\n".format(location.locations[callsign].dxcc))
 		locatorFile.write("    <GRIDSQUARE>{}</GRIDSQUARE>\n".format(locator[0]))
-		locatorFile.write("    <ITUZ>0</ITUZ>\n")
+		locatorFile.write("    <ITUZ>{}</ITUZ>\n".format(location.locations[callsign].itu))
 		locatorFile.write("  </StationData>\n")
 		locatorFile.write("</StationDataFile>\n")
 		locatorFile.close()
 
 		#Upload the ADIF to LoTW
-		lotwResult = subprocess.call(["tqsl", "-a", "abort", "-d", "-l", "test", "-u", "-x", "/tmp/log.adi"]) #, stderr = subprocess.DEVNULL)
+		lotwResult = subprocess.call(["tqsl", "-a", "abort", "-d", "-l", "test", "-u", "-x", "/tmp/log.adi"], stderr = subprocess.DEVNULL)
 
 		#Check error code
 		if(lotwResult == 0):
@@ -202,5 +224,7 @@ def log_tidy(callsign):
 
 
 if __name__ == '__main__':
-	clublog_upload("M0WUT")
-
+	log_tidy("M0WUT")
+	lotw_upload("M0WUT")
+	#clublog_upload("M0WUT")
+	#lotw_download("M0WUT")
