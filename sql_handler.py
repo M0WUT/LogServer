@@ -100,7 +100,7 @@ def clublog_upload(callsign):
 	c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd, LotwQslRcvd FROM log WHERE ClublogQsoUploadStatus = 'N' ORDER BY QsoDate, TimeOn")
 	qsos = c.fetchall()
 	if(qsos == ()):
-		print("Nothing to upload to Clublog")
+		print("Nothing to upload to Clublog for {}".format(callsign))
 		return 0
 
 	logfile = open ("/tmp/log.adi", "w")
@@ -165,7 +165,7 @@ def lotw_upload(callsign):
 	c.execute("SELECT DISTINCT MyGridSquare FROM log WHERE LotwQslSent = 'N'")
 	locators = c.fetchall() # Locators now contains all the locators with un-uploaded QSOs
 	if(locators == ()):
-		print("Nothing to upload to LoTW")
+		print("Nothing to upload to LoTW for {}".format(callsign))
 		return 0
 
 	for locator in locators: #For each locator
@@ -243,7 +243,7 @@ def guess_blank_dxcc(callsign):
 	c.execute("SELECT `Call` FROM log WHERE Dxcc = ''")
 	callsigns = c.fetchall()
 	if(callsigns == ()):
-		print("No tidying required")
+		print("No tidying required for {}".format(callsign))
 		db.close()
 		return 0
 
@@ -293,6 +293,7 @@ def guess_my_locator(callsign):
 
 	#Default locator found so update log
 	c.execute("UPDATE log SET MyGridSquare = %s WHERE MyGridSquare = ''", (location.default_locator[callsign],))
+	print("Blank locators for {} replaced with {}".format(callsign, location.default_locator[callsign]))
 	db.commit()
 	db.close()
 	return 0
