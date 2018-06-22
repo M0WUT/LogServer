@@ -7,7 +7,8 @@ import requests
 import subprocess
 import json
 import location
-
+import re #Regular expression library
+import time
 
 #Downloads any new QSLs from LoTW and updates log, sets ClublogQsoUploadStatus back to 'N' for any records changed
 #return		0 - Success
@@ -16,13 +17,11 @@ import location
 def lotw_download(callsign):
 	#Get last time we synced with LoTW to make more efficient
 	try:
-		file = open("synctime.txt", "r+")
+		file = open("synctime.txt", "r")
 		lastLotwSync = file.readline()
-		print("Downloading QSLs for {} since {}".format(callsign, lastLotwSync))
 	except:
 		lastLotwSync = "1945-01-01 00:00:00"
-		file = open("synctime.txt", "w")
-		print("Downloading all QSLs for {}".format(callsign))
+	file.close()
 
 	url = "https://lotw.arrl.org/lotwuser/lotwreport.adi"
 	values = {'login' : passwords.LOTW_USERNAME, 'password' : passwords.LOTW_PASSWORD, 'qso_query' : '1', 'qso_qsl' : 'yes', 'qso_qslsince' : lastLotwSync, 'qso_owncall' : callsign}
@@ -33,7 +32,53 @@ def lotw_download(callsign):
 		print("Error downloading data from LoTW")
 		return 2
 
-	print(log)
+	#Convert LoTW record to dictionary
+	#Code for ADIF parsing from OK4BX: (http://web.bxhome.org/blog/ok4bx/2012/05/adif-parser-python)
+	raw = re.split('<eoh>|<eor>(?i)', log) #Split on <eoh> or <eor>, case insensitive
+	raw.pop(0) #Remove header
+	raw.pop() #Remove End of File junk
+	logbook = []
+	for record in raw:
+		qso = {}
+		tags = re.findall('<(.*?):(\d+).*?>([^<\r\n]+)',record)
+		for tag in tags:
+			qso[tag[0].lower()] = tag[2].upper()
+		logbook.append(qso)
+
+	#Update MySQL database
+	try:
+		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
+					user = passwords.SQL_USERNAME,
+					passwd = passwords.SQL_PASSWORD,
+					port = passwords.SQL_PORT,
+					db = callsign)
+	except:
+		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
+		return 1
+
+	c = db.cursor()
+	errors = 0
+	for qso in logbook:
+		try:
+			c.execute("UPDATE log SET LotwQslRcvd = 'Y' WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn = %s", (qso['call'], qso['band'], qso['mode'], qso['qso_date'], qso['time_on']))
+		except KeyError:
+			print("No callsign found in record:")
+			print(qso)
+			errors += 1
+
+		if(c.rowcount != 1):
+			errors += 1
+			print("No record found in log for {} at {} on {}, {} {}".format(qso['call'], qso['time_on'], qso['qso_date'], qso['band'], qso['mode']))
+	print("{} QSLs for {}  downloaded from LoTW since {}, {} records updated in log".format(len(logbook), callsign, lastLotwSync, len(logbook) - errors))
+	db.commit()
+
+	#Save sync time to file
+	syncTime = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
+	file = open("synctime.txt", "w")
+	file.write(syncTime)
+	file.close()
+	return 0
+
 
 #Uploads any new QSOs for 'callsign' to Clublog
 #Assumes MySQL database has same name as callsign
@@ -47,8 +92,6 @@ def clublog_upload(callsign):
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
 					db = callsign)
-		print("\nStarting Clublog upload for {}".format(callsign))
-
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
 		return 1
@@ -79,6 +122,7 @@ def clublog_upload(callsign):
 		print("Uploaded QSOs for {} to Clublog".format(callsign))
 		c.execute("UPDATE log SET ClublogQsoUploadStatus = 'Y' WHERE ClublogQsoUploadStatus = 'N'")
 		db.commit()
+		print("QSOs for {} successfully uploaded to Clublog".format(callsign))
 		return 0
 	else:
 		print("Clublog Upload for {} failed".format(callsign))
@@ -112,8 +156,6 @@ def lotw_upload(callsign):
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
 					db = callsign)
-		print("\nStarting LoTW upload for {}".format(callsign))
-
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
 		return 12
@@ -142,14 +184,8 @@ def lotw_upload(callsign):
 		logfile.close()
 
 
-		#logfile now contains an ADIF with the new QSOs to be uploaded, now need to overwrite LotW Locator File so this log gets uploaded with correct locator
-		#Check that my callsign is in the locations dictionary (implies there is a LoTW certificate for it)
-		if(callsign not in location.locations):
-			print("No LoTW Certificate for callsign: {}".format(callsign))
-			return 14
-
 		#Get my CQ Zone, DXCC number and ITU Zone from locations file
-		#and Write station information to LoTW config file
+		#and write station information to LoTW config file
 		locatorFile = open("/home/pi/.tqsl/station_data", "w")
 		locatorFile.write("<StationDataFile>\n")
 		locatorFile.write("  <StationData name=\"test\">\n")
@@ -163,7 +199,9 @@ def lotw_upload(callsign):
 		locatorFile.close()
 
 		#Upload the ADIF to LoTW
+		print("\n\n")
 		lotwResult = subprocess.call(["tqsl", "-a", "abort", "-d", "-l", "test", "-u", "-x", "/tmp/log.adi"], stderr = subprocess.DEVNULL)
+		print("\n\n")
 
 		#Check error code
 		if(lotwResult == 0):
@@ -172,7 +210,7 @@ def lotw_upload(callsign):
 		elif(lotwResult == 1): print("Cancelled by user")
 		elif(lotwResult == 2): print("Rejected by LoTW")
 		elif(lotwResult == 3): print("Unexpected Response from TQSL Server")
-		elif(lotwResult == 4): print("TQSL Error")
+		elif(lotwResult == 4): print("TQSL Error, suspect Xvfb has not been setup")
 		elif(lotwResult == 5): print("TQSLlib Error")
 		elif(lotwResult == 6): print("Unable to open input file")
 		elif(lotwResult == 7): print("Unable to open output file")
@@ -182,23 +220,21 @@ def lotw_upload(callsign):
 		elif(lotwResult == 11): print("LoTW Connection Error")
 		else: print("Unknown TQSL Error")
 
-		db.close()
-		return lotwResult
+	db.close()
+	return lotwResult
 
 #If any fields have blank DXCC entries, ask Clublog and update them
 #returns	0: success - either nothing to do or all done fine
 #		1: Error connecting to SQL database
 #		2: One or more callsign returned error from Clublog
 
-def log_tidy(callsign):
+def guess_blank_dxcc(callsign):
 	try:
 		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
 					db = callsign)
-		print("\nBegun tidying for {}".format(callsign))
-
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
 		return 1
@@ -231,8 +267,40 @@ def log_tidy(callsign):
 		db.close()
 		return errorCode
 
+
+#Puts the default locator in for each callsign
+#returns	0 - Success
+#		1 - SQL Error
+#		2 - No default locator for the callsign
+def guess_my_locator(callsign):
+	try:
+		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
+					user = passwords.SQL_USERNAME,
+					passwd = passwords.SQL_PASSWORD,
+					port = passwords.SQL_PORT,
+					db = callsign)
+	except:
+		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
+		return 1
+	c = db.cursor()
+
+	#Check we have a default locator for this callsign
+	try:
+		x = location.default_locator[callsign]
+	except KeyError:
+		print("No default locator found for {}".format(callsign))
+		return 2
+
+	#Default locator found so update log
+	c.execute("UPDATE log SET MyGridSquare = %s WHERE MyGridSquare = ''", (location.default_locator[callsign],))
+	db.commit()
+	db.close()
+	return 0
+
+
 if __name__ == '__main__':
-	#log_tidy("M0WUT")
-	#lotw_upload("M0WUT")
-	#clublog_upload("M0WUT")
+	guess_blank_dxcc("M0WUT")
+	guess_my_locator("M0WUT")
+	lotw_upload("M0WUT")
 	lotw_download("M0WUT")
+	clublog_upload("M0WUT")
