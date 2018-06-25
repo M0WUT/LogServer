@@ -88,7 +88,7 @@ def lotw_download(callsign, lastSyncTime):
 #returns 	0 - Success
 #		1 - Callsign not found in 'callsign.py'
 #		2 - SQL Error
-#		3 - Clublog Error
+#		5 - Clublog Error
 def clublog_upload(callsign):
 
 	#Check we are setup to handle this callsign
@@ -137,7 +137,7 @@ def clublog_upload(callsign):
 		return 0
 	else:
 		print("Clublog Upload for {} failed".format(callsign))
-		return 3
+		return 5
 
 
 
@@ -147,17 +147,17 @@ def clublog_upload(callsign):
 #returns	0 - Success - Either nothing to do or all fine
 #		1 - Callsign not found in 'callsigns.py'
 #		2 - SQL Error
-#		3 - Cancelled by User
-#		4 - Rejected by LoTW
-#		5 - Unexpected response from TQSL server
-#		6 - TQSL error
-#		7 - TQSLlib error
-#		8 - Unable to open input file
-#		9 - Unable to open output file
-#		10 - All QSOs were duplicates or out of range
-#		11 - Some QSOs were duplicates or out of range
-#		12 - Command Syntax Error
-#		13 - LoTW Connection Error
+#		6 - Cancelled by User
+#		7 - Rejected by LoTW
+#		8 - Unexpected response from TQSL server
+#		9 - TQSL error
+#		10 - TQSLlib error
+#		11 - Unable to open input file
+#		12 - Unable to open output file
+#		13 - All QSOs were duplicates or out of range
+#		14 - Some QSOs were duplicates or out of range
+#		15 - Command Syntax Error
+#		16 - LoTW Connection Error
 
 def lotw_upload(callsign):
 
@@ -238,7 +238,7 @@ def lotw_upload(callsign):
 		else: print("Unknown TQSL Error")
 
 		#If not success, cancel everything and return
-		if(lotwResult != 0): return (lotwResult + 2) #(+2) as 0,1,2 are reserved for success, callsign not found and SQL error respectively in this program
+		if(lotwResult != 0): return (lotwResult + 5) #(+2) as smaller value error codes are taken are reserved for success, callsign not found and SQL error respectively in this program
 
 	db.close()
 	return 0
@@ -247,7 +247,8 @@ def lotw_upload(callsign):
 #returns	0 - success - either nothing to do or all done fine
 #		1 - Callsign not found in 'callsigns.py'
 #		2 - SQL Error
-#		3 - Clublog Error - either connection not valid or callsign not recognised
+#		5 - Clublog Error - either connection not valid or callsign not recognised
+#		17 - Clublog not recognising callsign
 
 def guess_blank_dxcc(callsign):
 	if(callsign not in callsigns.callsign_list()):
@@ -279,11 +280,11 @@ def guess_blank_dxcc(callsign):
 			result = requests.get(url, payload)
 			if(result.status_code != 200):
 				print("Error downloading data from Clublog for callsign {}".format(call))
-				return 3
+				return 5
 			info = json.loads(result.text)
 			if(info['DXCC'] == 0):
 				print("No DXCC found for {}".format(call[0]))
-				errorCode = 3
+				errorCode = 17
 			else:
 				print("Updating {} to Country: {}".format(call[0], info['Name']))
 				c.execute("UPDATE log SET Dxcc = %s, Country = %s WHERE `Call` = %s", (info['DXCC'], info['Name'].title(), call))
@@ -317,6 +318,7 @@ def fill_my_locator(callsign):
 	db.commit()
 	db.close()
 	return 0
+
 
 
 if __name__ == '__main__':
