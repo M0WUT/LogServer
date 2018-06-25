@@ -295,7 +295,7 @@ class DogLCD():
 		self.delayMicroseconds( delay )
 
 	def write(self, row, col, string):
-		self.setCursor(row, col);
+		self.setCursor(col, row);
 		string = str( string )
 		for char in string:
 			self.writeChar(ord(char))
@@ -306,3 +306,5 @@ class DogLCD():
 	def delay(self, delay):
 		time.sleep(delay/1000)
 
+	def clear_line(self, line):
+		self.write(line, 0, "                ")

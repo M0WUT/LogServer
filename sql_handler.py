@@ -1,40 +1,20 @@
 #!/usr/bin/python3
 
+import callsigns
 import passwords
 import MySQLdb
 import sys
 import requests
 import subprocess
 import json
-import location
 import re #Regular expression library
 import time
+import os
 
-#Downloads any new QSLs from LoTW and updates log, sets ClublogQsoUploadStatus back to 'N' for any records changed
-#return		0 - Success
-#		1 - SQL Error
-#		2 - LoTW Download Error
-def lotw_download(callsign):
-	#Get last time we synced with LoTW to make more efficient
-	try:
-		file = open("synctime.txt", "r")
-		lastLotwSync = file.readline()
-	except:
-		lastLotwSync = "1945-01-01 00:00:00"
-	file.close()
-
-	url = "https://lotw.arrl.org/lotwuser/lotwreport.adi"
-	values = {'login' : passwords.LOTW_USERNAME, 'password' : passwords.LOTW_PASSWORD, 'qso_query' : '1', 'qso_qsl' : 'yes', 'qso_qslsince' : lastLotwSync, 'qso_owncall' : callsign}
-
-	result = requests.get(url,values)
-	log = result.text
-	if(result.status_code != 200):
-		print("Error downloading data from LoTW")
-		return 2
-
-	#Convert LoTW record to dictionary
-	#Code for ADIF parsing from OK4BX: (http://web.bxhome.org/blog/ok4bx/2012/05/adif-parser-python)
-	raw = re.split('<eoh>|<eor>(?i)', log) #Split on <eoh> or <eor>, case insensitive
+#Converts an ADIF file to an array of qsos, with each qso being a dictionary
+def adif_to_dictionary(adif):
+#Code for ADIF parsing heavily based on code from  OK4BX: (http://web.bxhome.org/blog/ok4bx/2012/05/adif-parser-python)
+	raw = re.split('<eoh>|<eor>(?i)', adif) #Split on <eoh> or <eor>, case insensitive
 	raw.pop(0) #Remove header
 	raw.pop() #Remove End of File junk
 	logbook = []
@@ -44,6 +24,33 @@ def lotw_download(callsign):
 		for tag in tags:
 			qso[tag[0].lower()] = tag[2].upper()
 		logbook.append(qso)
+	return logbook
+
+
+#Downloads any new QSLs from LoTW and updates log, sets ClublogQsoUploadStatus back to 'N' for any records changed
+#return		0 - Success
+#		1 - Callsign not in 'callsigns.py'
+#		2 - SQL Error
+#		3 - LoTW Download Error
+#		4 - Unmatched QSL found in downloaded log
+def lotw_download(callsign, lastSyncTime):
+
+	#Check we are setup to handle this callsign
+	if(callsign not in callsigns.callsign_list()):
+		print("Not setup to handle callsign: {}".format(callsign))
+		return 1
+
+
+	url = "https://lotw.arrl.org/lotwuser/lotwreport.adi"
+	values = {'login' : passwords.LOTW_USERNAME, 'password' : passwords.LOTW_PASSWORD, 'qso_query' : '1', 'qso_qsl' : 'yes', 'qso_qslsince' : lastSyncTime, 'qso_owncall' : callsign}
+
+	result = requests.get(url,values)
+	log = result.text
+	if(result.status_code != 200):
+		print("Error downloading data from LoTW")
+		return 3
+
+	logbook = adif_to_dictionary(log)
 
 	#Update MySQL database
 	try:
@@ -51,16 +58,16 @@ def lotw_download(callsign):
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
-					db = callsign)
+					db = callsign.replace('/', '_'))
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
-		return 1
+		return 2
 
 	c = db.cursor()
 	errors = 0
 	for qso in logbook:
-		try:
-			c.execute("UPDATE log SET LotwQslRcvd = 'Y' WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn = %s", (qso['call'], qso['band'], qso['mode'], qso['qso_date'], qso['time_on']))
+		try:	#Set Clublog upload status to no so it's re-uploaded showing confirmed
+			c.execute("UPDATE log SET LotwQslRcvd = 'Y', ClublogQsoUploadStatus = 'N' WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn = %s", (qso['call'], qso['band'], qso['mode'], qso['qso_date'], qso['time_on']))
 		except KeyError:
 			print("No callsign found in record:")
 			print(qso)
@@ -69,32 +76,36 @@ def lotw_download(callsign):
 		if(c.rowcount != 1):
 			errors += 1
 			print("No record found in log for {} at {} on {}, {} {}".format(qso['call'], qso['time_on'], qso['qso_date'], qso['band'], qso['mode']))
-	print("{} QSLs for {}  downloaded from LoTW since {}, {} records updated in log".format(len(logbook), callsign, lastLotwSync, len(logbook) - errors))
+	print("{} QSLs for {}  downloaded from LoTW since {}, {} records updated in log".format(len(logbook), callsign, lastSyncTime, len(logbook) - errors))
 	db.commit()
 
-	#Save sync time to file
-	syncTime = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
-	file = open("synctime.txt", "w")
-	file.write(syncTime)
-	file.close()
-	return 0
+	if(errors == 0): return 0
+	else: return 4
 
 
 #Uploads any new QSOs for 'callsign' to Clublog
 #Assumes MySQL database has same name as callsign
 #returns 	0 - Success
-#		1 - SQL Error
-#		2 - Clublog Error
+#		1 - Callsign not found in 'callsign.py'
+#		2 - SQL Error
+#		3 - Clublog Error
 def clublog_upload(callsign):
+
+	#Check we are setup to handle this callsign
+	if(callsign not in callsigns.callsign_list()):
+		print("Not setup to handle callsign: {}".format(callsign))
+		return 1
+
+	#Attempt to connect to MySQL database for that callsign
 	try:
 		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
-					db = callsign)
+					db = callsign.replace('/', '_'))
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
-		return 1
+		return 2
 
 	c = db.cursor()
 	c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd, LotwQslRcvd FROM log WHERE ClublogQsoUploadStatus = 'N' ORDER BY QsoDate, TimeOn")
@@ -126,42 +137,48 @@ def clublog_upload(callsign):
 		return 0
 	else:
 		print("Clublog Upload for {} failed".format(callsign))
-		return 2
-
+		return 3
 
 
 
 #Uploads any new QSOs for 'callsign' to LoTW
-#Expects MySQL database to have same name as callsign
+#Expects MySQL database to have same name as callsign with any '/' replaced with '_'
 
-#returns	0: Success - Either nothing to do or all fine
-#		1: Cancelled by User
-#		2: Rejected by LoTW
-#		3: Unexpected response from TQSL server
-#		4: TQSL error
-#		5: TQSLlib error
-#		6: Unable to open input file
-#		7: Unable to open output file
-#		8: All QSOs were duplicates or out of range
-#		9: Some QSOs were duplicates or out of range
-#		10: Command Syntax Error
-#		11: LoTW Connection Error
-#		12: Error connectiong to SQL database
-#		13: My callsign gives invalid DXCC from Clublog
-#		14: No LoTW certificate for the callsign
+#returns	0 - Success - Either nothing to do or all fine
+#		1 - Callsign not found in 'callsigns.py'
+#		2 - SQL Error
+#		3 - Cancelled by User
+#		4 - Rejected by LoTW
+#		5 - Unexpected response from TQSL server
+#		6 - TQSL error
+#		7 - TQSLlib error
+#		8 - Unable to open input file
+#		9 - Unable to open output file
+#		10 - All QSOs were duplicates or out of range
+#		11 - Some QSOs were duplicates or out of range
+#		12 - Command Syntax Error
+#		13 - LoTW Connection Error
+
 def lotw_upload(callsign):
+
+	#Check we are setup to handle this callsign
+	if(callsign not in callsigns.callsign_list()):
+		print("Not setup to handle callsign: {}".format(callsign))
+		return 1
+
+	#Attempt to connect to MySQL database for that callsign
 	try:
 		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
-					db = callsign)
+					db = callsign.replace('/', '_'))
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
-		return 12
+		return 2
 
 	c = db.cursor()
-	#Deal with LotW first, each locator I used must be uploaded seperately
+	#Deal with LotW first, each locator used must be uploaded seperately
 	c.execute("SELECT DISTINCT MyGridSquare FROM log WHERE LotwQslSent = 'N'")
 	locators = c.fetchall() # Locators now contains all the locators with un-uploaded QSOs
 	if(locators == ()):
@@ -190,10 +207,10 @@ def lotw_upload(callsign):
 		locatorFile.write("<StationDataFile>\n")
 		locatorFile.write("  <StationData name=\"test\">\n")
 		locatorFile.write("    <CALL>{}</CALL>\n".format(callsign))
-		locatorFile.write("    <CQZ>{}</CQZ>\n".format(location.locations[callsign].cqz))
-		locatorFile.write("    <DXCC>{}</DXCC>\n".format(location.locations[callsign].dxcc))
+		locatorFile.write("    <CQZ>{}</CQZ>\n".format(callsigns.locations[callsign].cqz))
+		locatorFile.write("    <DXCC>{}</DXCC>\n".format(callsigns.locations[callsign].dxcc))
 		locatorFile.write("    <GRIDSQUARE>{}</GRIDSQUARE>\n".format(locator[0]))
-		locatorFile.write("    <ITUZ>{}</ITUZ>\n".format(location.locations[callsign].itu))
+		locatorFile.write("    <ITUZ>{}</ITUZ>\n".format(callsigns.locations[callsign].itu))
 		locatorFile.write("  </StationData>\n")
 		locatorFile.write("</StationDataFile>\n")
 		locatorFile.close()
@@ -220,46 +237,53 @@ def lotw_upload(callsign):
 		elif(lotwResult == 11): print("LoTW Connection Error")
 		else: print("Unknown TQSL Error")
 
+		#If not success, cancel everything and return
+		if(lotwResult != 0): return (lotwResult + 2) #(+2) as 0,1,2 are reserved for success, callsign not found and SQL error respectively in this program
+
 	db.close()
-	return lotwResult
+	return 0
 
 #If any fields have blank DXCC entries, ask Clublog and update them
-#returns	0: success - either nothing to do or all done fine
-#		1: Error connecting to SQL database
-#		2: One or more callsign returned error from Clublog
+#returns	0 - success - either nothing to do or all done fine
+#		1 - Callsign not found in 'callsigns.py'
+#		2 - SQL Error
+#		3 - Clublog Error - either connection not valid or callsign not recognised
 
 def guess_blank_dxcc(callsign):
+	if(callsign not in callsigns.callsign_list()):
+		print("Not setup to handle callsign: {}".format(callsign))
+		return 1
+
 	try:
 		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
-					db = callsign)
+					db = callsign.replace('/', '_'))
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
-		return 1
+		return 2
 
 	c = db.cursor()
 	c.execute("SELECT `Call` FROM log WHERE Dxcc = ''")
-	callsigns = c.fetchall()
-	if(callsigns == ()):
-		print("No tidying required for {}".format(callsign))
+	callsignsToUpdate = c.fetchall()
+	if(callsignsToUpdate == ()):
 		db.close()
 		return 0
 
 	else:
 		errorCode = 0
-		for call in callsigns: #I know the helpage says don't iterate but there shouldn't be many
+		for call in callsignsToUpdate: #I know the helpage says don't iterate but there shouldn't be many
 			url = 'https://clublog.org/dxcc'
 			payload = {'call' : call[0], 'api' : passwords.CLUBLOG_API_KEY, 'full' : '1'}
 			result = requests.get(url, payload)
 			if(result.status_code != 200):
 				print("Error downloading data from Clublog for callsign {}".format(call))
-				return 2
+				return 3
 			info = json.loads(result.text)
 			if(info['DXCC'] == 0):
 				print("No DXCC found for {}".format(call[0]))
-				errorCode = 2
+				errorCode = 3
 			else:
 				print("Updating {} to Country: {}".format(call[0], info['Name']))
 				c.execute("UPDATE log SET Dxcc = %s, Country = %s WHERE `Call` = %s", (info['DXCC'], info['Name'].title(), call))
@@ -271,29 +295,25 @@ def guess_blank_dxcc(callsign):
 #Puts the default locator in for each callsign
 #returns	0 - Success
 #		1 - SQL Error
-#		2 - No default locator for the callsign
-def guess_my_locator(callsign):
+#		2 - 'callsigns.py' not setup to handle supplied callsign
+def fill_my_locator(callsign):
+	if(callsign not in callsigns.callsign_list()):
+		print("Not setup to handle callsign: {}".format(callsign))
+		return 1
 	try:
 		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
-					db = callsign)
+					db = callsign.replace('/', '_'))
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
-		return 1
+		return 2
 	c = db.cursor()
 
-	#Check we have a default locator for this callsign
-	try:
-		x = location.default_locator[callsign]
-	except KeyError:
-		print("No default locator found for {}".format(callsign))
-		return 2
-
 	#Default locator found so update log
-	c.execute("UPDATE log SET MyGridSquare = %s WHERE MyGridSquare = ''", (location.default_locator[callsign],))
-	print("Blank locators for {} replaced with {}".format(callsign, location.default_locator[callsign]))
+	c.execute("UPDATE log SET MyGridSquare = %s WHERE MyGridSquare = ''", (callsigns.locations[callsign].defaultGridsquare,))
+	if(c.rowcount > 0): print("Blank locators for {} replaced with {}".format(callsign, callsigns.locations[callsign].defaultGridsquare))
 	db.commit()
 	db.close()
 	return 0
@@ -301,7 +321,7 @@ def guess_my_locator(callsign):
 
 if __name__ == '__main__':
 	guess_blank_dxcc("M0WUT")
-	guess_my_locator("M0WUT")
+	fill_my_locator("M0WUT")
 	lotw_upload("M0WUT")
 	lotw_download("M0WUT")
 	clublog_upload("M0WUT")

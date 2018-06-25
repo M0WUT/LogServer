@@ -1,0 +1,15 @@
+#MySQL Database
+SQL_SERVER = "8.8.8.8"
+SQL_PORT = 3306
+SQL_USERNAME = "User"
+SQL_PASSWORD = "Password"
+
+#Clublog
+CLUBLOG_API_KEY = "1234"
+CLUBLOG_EMAIL = "name@domain.com"
+CLUBLOG_APPLICATION_PASSWORD = "password"
+
+#LoTW
+LOTW_USERNAME = "p5a"
+LOTW_PASSWORD = "password"
+
