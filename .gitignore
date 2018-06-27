@@ -1,4 +1,6 @@
+
+synctime.txt
 passwords.py
 *.pyc
 __pycache__/*
-synctime.txt
+

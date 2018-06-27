@@ -11,6 +11,96 @@ import re #Regular expression library
 import time
 import os
 
+
+#Syncs all callsigns in callsigns.callsigns_list()
+#Returns:       0 - Success
+#               1 - Callsign not in callsigns_list (should be impossible as callsigns are generated from callsigns_list)
+#               2 - Error connecting to SQL database
+#               3 - Error downloading QSLs from LoTW
+#               4 - LoTW QSL not found in log
+#               5 - Error requesting data from Clublog
+#               6 - TQSL Error: Cancelled by User
+#               7 - TQSL Error: Rejected by LoTW
+#               8 - TQSL Error: Unexpected response from LoTW server
+#               9 - TQSL Error: TQSL Error
+#               10 - TQSL Error: TQSLlib Error
+#               11 - TQSL Error: Unable to open input file
+#               12 - TQSL Error: Unable to open output file
+#               13 - TQSL Error: All QSOs wer duplicates or out of range
+#               14 - TQSL Error: Some QSOs were duplicates or out of range
+#               15 - TQSL Error: Command Syntax Error
+#               16 - TQSL Error: LoTW Connection Error
+#		17 - TQSL Error: Unknown, most likely framebuffer not set
+#               18 - Callsign not recognised by Clublog
+
+
+def handle_everything(lcd):
+	try:
+		file = open('/home/pi/LogServer/synctime.txt', 'r')
+		lastSyncTime = file.read()
+		file.close()
+	except:
+		lastSyncTime = "1945-01-01 00:00:00"
+
+	lcd.clear()
+	for callsign in callsigns.callsign_list():
+
+		lcd.clear()
+		lcd.write(0,2, "Processing:")
+		lcd.write(1,0, callsign)
+
+		#Fill in any blank dxcc fields
+		lcd.clear_line(2)
+		lcd.write(2, 1, "Checking DXCCs")
+		errorCode = guess_blank_dxcc(callsign)
+
+		if(errorCode == 0): pass
+		else: return(errorCode, callsign)
+
+		#Fill in any QSO where my locator hasn't been specified with the default from 'callsigns.py'
+		lcd.clear_line(2)
+		lcd.write(2, 0, "Updating locator")
+		errorCode = fill_my_locator(callsign)
+
+		if(errorCode == 0): pass
+		else: return(errorCode, callsign)
+
+		#Upload any new QSOs to LoTW
+		lcd.clear_line(2)
+		lcd.write(2, 1, "LoTW Uploading")
+		errorCode = lotw_upload(callsign)
+
+		if(errorCode == 0): pass
+		else: return(errorCode, callsign)
+
+		#Download any new QSLs from LoTW
+		lcd.clear_line(2)
+		lcd.write(2, 0, "LoTW Downloading")
+		errorCode = lotw_download(callsign, lastSyncTime)
+
+		if(errorCode == 0): pass
+		else: return(errorCode, callsign)
+
+		#Upload any new QSOs to Clublog
+		lcd.clear_line(2)
+		lcd.write(2, 1, "Clublog upload")
+		errorCode = clublog_upload(callsign)
+
+		if(errorCode == 0): pass
+		else: return(errorCode, callsign)
+
+	#Save sync time to file
+	syncTime = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
+	returnTime = time.strftime('%d-%m-%Y %H:%M', time.gmtime())
+
+	file = open("/home/pi/LogServer/synctime.txt", "w")
+	file.write(syncTime)
+	file.close()
+	lcd.clear()
+	return(0, returnTime)
+
+
+
 #Converts an ADIF file to an array of qsos, with each qso being a dictionary
 def adif_to_dictionary(adif):
 #Code for ADIF parsing heavily based on code from  OK4BX: (http://web.bxhome.org/blog/ok4bx/2012/05/adif-parser-python)
@@ -58,7 +148,8 @@ def lotw_download(callsign, lastSyncTime):
 					user = passwords.SQL_USERNAME,
 					passwd = passwords.SQL_PASSWORD,
 					port = passwords.SQL_PORT,
-					db = callsign.replace('/', '_'))
+					db = callsign.replace('/', '_'),
+					client_flag = MySQLdb.constants.CLIENT.FOUND_ROWS) #so rowcount returns matched rows rather than updated rows
 	except:
 		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
 		return 2
@@ -67,7 +158,7 @@ def lotw_download(callsign, lastSyncTime):
 	errors = 0
 	for qso in logbook:
 		try:	#Set Clublog upload status to no so it's re-uploaded showing confirmed
-			c.execute("UPDATE log SET LotwQslRcvd = 'Y', ClublogQsoUploadStatus = 'N' WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn = %s", (qso['call'], qso['band'], qso['mode'], qso['qso_date'], qso['time_on']))
+			c.execute("UPDATE log SET LotwQslRcvd = 'Y', ClublogQsoUploadStatus = 'N' WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn LIKE %s", (qso['call'], qso['band'], qso['mode'], qso['qso_date'], (qso['time_on'][:-2] + '%')))
 		except KeyError:
 			print("No callsign found in record:")
 			print(qso)
@@ -75,7 +166,7 @@ def lotw_download(callsign, lastSyncTime):
 
 		if(c.rowcount != 1):
 			errors += 1
-			print("No record found in log for {} at {} on {}, {} {}".format(qso['call'], qso['time_on'], qso['qso_date'], qso['band'], qso['mode']))
+			print('No record found in {}\'s log for {} at {} on {}, {} {}'.format(callsign, qso['call'], qso['time_on'], qso['qso_date'], qso['band'], qso['mode']))
 	print("{} QSLs for {}  downloaded from LoTW since {}, {} records updated in log".format(len(logbook), callsign, lastSyncTime, len(logbook) - errors))
 	db.commit()
 
@@ -126,9 +217,10 @@ def clublog_upload(callsign):
 
 	#Now have ADIF file ready for upload to Clublog
 	url = "https://clublog.org/putlogs.php"
-	files = {'file' : open("/tmp/log.adi", "rb")}
+	files = {'file' : open("/tmp/log.adi", "r")}
 	values = {'email' : passwords.CLUBLOG_EMAIL, 'password' : passwords.CLUBLOG_APPLICATION_PASSWORD, 'callsign' : callsign, 'api' : passwords.CLUBLOG_API_KEY}
-	errorCode = requests.post(url, files=files, data=values).status_code
+	request = requests.post(url, files=files, data=values)
+	errorCode = request.status_code
 	if(errorCode == 200):
 		print("Uploaded QSOs for {} to Clublog".format(callsign))
 		c.execute("UPDATE log SET ClublogQsoUploadStatus = 'Y' WHERE ClublogQsoUploadStatus = 'N'")
@@ -136,7 +228,7 @@ def clublog_upload(callsign):
 		print("QSOs for {} successfully uploaded to Clublog".format(callsign))
 		return 0
 	else:
-		print("Clublog Upload for {} failed".format(callsign))
+		print("Clublog Upload for {} failed. Error {}: ".format(callsign, errorCode, request.text))
 		return 5
 
 
@@ -158,6 +250,7 @@ def clublog_upload(callsign):
 #		14 - Some QSOs were duplicates or out of range
 #		15 - Command Syntax Error
 #		16 - LoTW Connection Error
+#		17 - Unknown TQSL error, most likely no framebuffer set
 
 def lotw_upload(callsign):
 
@@ -217,7 +310,7 @@ def lotw_upload(callsign):
 
 		#Upload the ADIF to LoTW
 		print("\n\n")
-		lotwResult = subprocess.call(["tqsl", "-a", "abort", "-d", "-l", "test", "-u", "-x", "/tmp/log.adi"], stderr = subprocess.DEVNULL)
+		lotwResult = subprocess.call(["tqsl", "-a", "abort", "-d", "-l", "test", "-u", "-x", "/tmp/log.adi"])
 		print("\n\n")
 
 		#Check error code
@@ -227,7 +320,7 @@ def lotw_upload(callsign):
 		elif(lotwResult == 1): print("Cancelled by user")
 		elif(lotwResult == 2): print("Rejected by LoTW")
 		elif(lotwResult == 3): print("Unexpected Response from TQSL Server")
-		elif(lotwResult == 4): print("TQSL Error, suspect Xvfb has not been setup")
+		elif(lotwResult == 4): print("TQSL Error")
 		elif(lotwResult == 5): print("TQSLlib Error")
 		elif(lotwResult == 6): print("Unable to open input file")
 		elif(lotwResult == 7): print("Unable to open output file")
@@ -235,8 +328,9 @@ def lotw_upload(callsign):
 		elif(lotwResult == 9): print("Some QSOs were duplicates or out of range")
 		elif(lotwResult == 10): print("Command Syntax Error")
 		elif(lotwResult == 11): print("LoTW Connection Error")
-		else: print("Unknown TQSL Error")
-
+		else:
+			print("Unknown TQSL Error, most likely Framebuffer not set")
+			lotwResult = 12
 		#If not success, cancel everything and return
 		if(lotwResult != 0): return (lotwResult + 5) #(+2) as smaller value error codes are taken are reserved for success, callsign not found and SQL error respectively in this program
 
@@ -248,7 +342,7 @@ def lotw_upload(callsign):
 #		1 - Callsign not found in 'callsigns.py'
 #		2 - SQL Error
 #		5 - Clublog Error - either connection not valid or callsign not recognised
-#		17 - Clublog not recognising callsign
+#		18 - Clublog not recognising callsign
 
 def guess_blank_dxcc(callsign):
 	if(callsign not in callsigns.callsign_list()):
@@ -284,7 +378,7 @@ def guess_blank_dxcc(callsign):
 			info = json.loads(result.text)
 			if(info['DXCC'] == 0):
 				print("No DXCC found for {}".format(call[0]))
-				errorCode = 17
+				errorCode = 18
 			else:
 				print("Updating {} to Country: {}".format(call[0], info['Name']))
 				c.execute("UPDATE log SET Dxcc = %s, Country = %s WHERE `Call` = %s", (info['DXCC'], info['Name'].title(), call))
@@ -321,9 +415,3 @@ def fill_my_locator(callsign):
 
 
 
-if __name__ == '__main__':
-	guess_blank_dxcc("M0WUT")
-	fill_my_locator("M0WUT")
-	lotw_upload("M0WUT")
-	lotw_download("M0WUT")
-	clublog_upload("M0WUT")

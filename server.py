@@ -7,94 +7,6 @@ import RPi.GPIO as GPIO
 import callsigns
 import sql_handler
 
-#Syncs all callsigns in callsigns.callsigns_list()
-#Returns:	0 - Success
-#		1 - Callsign not in callsigns_list (should be impossible as callsigns are generated from callsigns_list)
-#		2 - Error connecting to SQL database
-#		3 - Error downloading QSLs from LoTW
-#		4 - LoTW QSL not found in log
-#		5 - Error requesting data from Clublog
-#		6 - TQSL Error: Cancelled by User
-#		7 - TQSL Error: Rejected by LoTW
-#		8 - TQSL Error: Unexpected response from LoTW server
-#		9 - TQSL Error: TQSL Error
-#		10 - TQSL Error: TQSLlib Error
-#		11 - TQSL Error: Unable to open input file
-#		12 - TQSL Error: Unable to open output file
-#		13 - TQSL Error: All QSOs wer duplicates or out of range
-#		14 - TQSL Error: Some QSOs were duplicates or out of range
-#		15 - TQSL Error: Command Syntax Error
-#		16 - TQSL Error: LoTW Connection Error
-#		17 - Callsign not recognised by Clublog
-
-
-def handle_everything():
-	try:
-		file = open('synctime.txt', 'r')
-		lastSyncTime = file.read()
-		file.close()
-	except:
-		lastSyncTime = "1945-01-01 00:00:00"
-
-	lcd.clear()
-
-	for callsign in callsigns.callsign_list():
-
-		lcd.clear()
-		lcd.write(0,2, "Processing:")
-		lcd.write(1,0, callsign)
-
-		#Fill in any blank dxcc fields
-		lcd.clear_line(2)
-		lcd.write(2, 1, "Checking DXCCs")
-		errorCode = sql_handler.guess_blank_dxcc(callsign)
-
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
-
-		#Fill in any QSO where my locator hasn't been specified with the default from 'callsigns.py'
-		lcd.clear_line(2)
-		lcd.write(2, 0, "Updating locator")
-		errorCode = sql_handler.fill_my_locator(callsign)
-
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
-
-		#Upload any new QSOs to LoTW
-		lcd.clear_line(2)
-		lcd.write(2, 1, "LoTW Uploading")
-		sql_handler.lotw_upload(callsign)
-
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
-
-		#Download any new QSLs from LoTW
-		lcd.clear_line(2)
-		lcd.write(2, 0, "LoTW Downloading")
-		sql_handler.lotw_download(callsign, lastSyncTime)
-
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
-
-		#Upload any new QSOs to Clublog
-		sql_handler.clublog_upload(callsign)
-		lcd.clear_line(2)
-		lcd.write(2, 1, "Clublog upload")
-
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
-
-	#Save sync time to file
-	syncTime = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
-	returnTime = time.strftime('%d-%m-%Y %H:%M', time.gmtime())
-
-	file = open("synctime.txt", "w")
-	file.write(syncTime)
-	file.close()
-	lcd.clear()
-	return(0, returnTime)
-
-
 ####################################################
 #Callsigns to be handled should be in 'callsigns.py#
 ####################################################
@@ -110,6 +22,12 @@ LCD_CONTRAST = 12
 # Setup LCD
 lcd = doglcd.DogLCD(10, 11, 25, -1, -1, -1) #(SI, CLK, RS, RSB, Reset, Backlight)
 lcd.begin(doglcd.DOG_LCD_M163, LCD_CONTRAST)
+
+#Setup fake framebuffer for TQSL
+try:
+	x=os.environ['DISPLAY'] #See if framebuffer running
+except KeyError:
+	subprocess.call(["/home/pi/LogServer/fake_framebuffer.sh"]) #if not, start fake one
 
 #Setup warning LED
 GPIO.setmode(GPIO.BCM)
@@ -146,28 +64,20 @@ except:
 ##################################################################################
 while(1):
 	lcd.clear()
-	errorCode, callsign = handle_everything()
+	errorCode, callsign = sql_handler.handle_everything(lcd)
 	lcd.clear()
-	callsign = callsign.center(16, ' ')
-
+	lcd.write(2, 0, ip) #Always show IP
 	if(errorCode == 0):
 		lcd.write(0,0, ip)
 		lcd.write(1,1, "Last synced at")
 		lcd.write(2,0, callsign) #In the case of success, callsign contains the sync time
-	elif(errorCode == 2): lcd.write(0,0, "Error connecting  to MySQL for  " + callsign)
-	elif(errorCode == 3): lcd.write(0,0, " LoTW Download     error for:   " + callsign)
-	elif(errorCode == 4): lcd.write(0,0, "  LoTW QSL not    found in log  " + callsign)
-	elif(errorCode == 5): lcd.write(0,0, "Clublog Request      error      " + callsign)
-	elif(errorCode == 17): lcd.write(0,0, "  Unrecognised  callsign in log:" + callsign)
+	elif(errorCode == 2): lcd.write(0,0, "MySQL Error for:" + callsign.center(16, ' '))
+	elif(errorCode == 3): lcd.write(0,0, " LoTW Download  Error:" + callsign)
+	elif(errorCode == 4): lcd.write(0,0, "LoTW QSL not in log:  " + callsign)
+	elif(errorCode == 5): lcd.write(0,0, "Clublog Request Error:" + callsign)
+	elif(errorCode == 18): lcd.write(0,0, "Bad DXCC in log:" + callsign)
 	else:
-		lcd_write(0,0, "   TQSL Error        in log     " + callsign)
-
-
-
-
-
-
-
+		lcd.write(0,0, " TQSL Error in: " + callsign)
 
 
 
