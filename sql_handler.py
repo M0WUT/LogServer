@@ -12,6 +12,58 @@ import time
 import os
 
 
+#Downloads all QSL request from clublog since 'lastSyncTime' for callsign
+#Expected lastSyncTime format 1945-01-27 12:34:00
+#Returns	0 - Success
+#		1 - Callsign not in callsigns_list
+#		2 - Error connecting to MySQL database
+#		5 - Error requesting data from Clublog
+def oqrs_download(callsign, lastSyncTime):
+
+	#Check we are setup to handle this callsign
+	if(callsign not in callsigns.callsign_list()):
+		print("Not setup to handle callsign: {}".format(callsign))
+		return 1
+
+	#Open MySQL database
+	try:
+		db = MySQLdb.connect(	host = passwords.SQL_SERVER,
+					user = passwords.SQL_USERNAME,
+					passwd = passwords.SQL_PASSWORD,
+					port = passwords.SQL_PORT,
+					db = callsign.replace('/', '_'),
+					client_flag = 2) #so rowcount returns matched rows rather than updated rows
+
+	except:
+		print("Failed to connect to SQL database for {} on {}:{}".format(callsign, passwords.SQL_SERVER, passwords.SQL_PORT))
+		return 2
+
+	c = db.cursor()
+
+
+	url = "https://clublog.org/getadif.php"
+	year = lastSyncTime[:4]
+	month = lastSyncTime[5:7]
+	day = lastSyncTime[8:10]
+	values = {'email' : passwords.CLUBLOG_EMAIL, 'password' : passwords.CLUBLOG_APPLICATION_PASSWORD, 'call' : callsign, 'type' : 'dxqsl', 'startyear' : year, 'startmonth' : month, 'startday' : day}
+	result = requests.post(url, data=values)
+	if(result.status_code != 200):
+		print("Error downloading data from Clublog for callsign {}".format(call))
+		return 5
+	log = result.text
+	logbook = adif_to_dictionary(log)
+
+
+	for qso in logbook:
+		c.execute("UPDATE log SET QslSent = %s, QslSentVia = %s, QslSDate = %s, Address = %s WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn LIKE %s", \
+				(qso['qsl_sent'], qso['qsl_sent_via'] if 'qsl_sent_via' in qso else('D' if 'address' in qso else 'B'), \
+				qso['qslsdate'] if 'qslsdate' in qso else '', \
+				(qso['call'] + ', ' + qso['address']).replace(', ', '\r\n').replace(',', '\r\n') if 'address' in qso else '', qso['call'], qso['band'], qso['mode'], qso['qso_date'], qso['time_on'][:4]+'%'))
+		if(c.rowcount != 1):
+			print("No match found for {} in QSO with {} on {} {}, {} {}".format(callsign, qso['call'], qso['qso_date'], qso['time_on'], qso['band'], qso['mode']))
+	db.commit()
+	db.close()
+
 #Syncs all callsigns in callsigns.callsigns_list()
 #Returns:       0 - Success
 #               1 - Callsign not in callsigns_list (should be impossible as callsigns are generated from callsigns_list)
@@ -199,7 +251,7 @@ def clublog_upload(callsign):
 		return 2
 
 	c = db.cursor()
-	c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd, LotwQslRcvd FROM log WHERE ClublogQsoUploadStatus = 'N' ORDER BY QsoDate, TimeOn")
+	c.execute("SELECT QsoDate, TimeOn, Freq, Band, Mode, `Call`, RstSent, RstRcvd, LotwQslRcvd, QslSent FROM log WHERE ClublogQsoUploadStatus = 'N' ORDER BY QsoDate, TimeOn")
 	qsos = c.fetchall()
 	if(qsos == ()):
 		print("Nothing to upload to Clublog for {}".format(callsign))
@@ -212,7 +264,7 @@ def clublog_upload(callsign):
 		freq = qso[2]
 		freq = freq.split('.')[0] #Seperate off only the whole number of kHz(the bit before the decimal point)
 		freq = freq[:-3] + '.' + freq[-3:]
-		logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <LOTW_QSL_RCVD:1>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7], qso[8]))
+		logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <LOTW_QSL_RCVD:1>{} <QSL_SENT:1>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7], qso[8], qso[9]))
 	logfile.close()
 
 	#Now have ADIF file ready for upload to Clublog
@@ -415,3 +467,5 @@ def fill_my_locator(callsign):
 
 
 
+if(__name__ == '__main__'):
+	oqrs_download("FP/M0WUT", "1945-01-23 12:34")
