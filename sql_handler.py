@@ -52,7 +52,7 @@ def oqrs_download(callsign, lastSyncTime):
 		return 5
 	log = result.text
 	logbook = adif_to_dictionary(log)
-
+	errors = 0
 
 	for qso in logbook:
 		c.execute("UPDATE log SET QslSent = %s, QslSentVia = %s, QslSDate = %s, Address = %s WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn LIKE %s", \
@@ -60,7 +60,11 @@ def oqrs_download(callsign, lastSyncTime):
 				qso['qslsdate'] if 'qslsdate' in qso else '', \
 				(qso['call'] + ', ' + qso['address']).replace(', ', '\r\n').replace(',', '\r\n') if 'address' in qso else '', qso['call'], qso['band'], qso['mode'], qso['qso_date'], qso['time_on'][:4]+'%'))
 		if(c.rowcount != 1):
+			errors += 1
 			print("No match found for {} in QSO with {} on {} {}, {} {}".format(callsign, qso['call'], qso['qso_date'], qso['time_on'], qso['band'], qso['mode']))
+
+	print("{} OQRS requests downloaded for {}".format(len(logbook) - errors, callsign))
+
 	db.commit()
 	db.close()
 
@@ -106,40 +110,47 @@ def handle_everything(lcd):
 		lcd.write(2, 1, "Checking DXCCs")
 		errorCode = guess_blank_dxcc(callsign)
 
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
+		if(errorCode != 0): return(errorCode, callsign)
+
 
 		#Fill in any QSO where my locator hasn't been specified with the default from 'callsigns.py'
 		lcd.clear_line(2)
 		lcd.write(2, 0, "Updating locator")
 		errorCode = fill_my_locator(callsign)
 
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
+		if(errorCode != 0): return(errorCode, callsign)
+
 
 		#Upload any new QSOs to LoTW
 		lcd.clear_line(2)
 		lcd.write(2, 1, "LoTW Uploading")
 		errorCode = lotw_upload(callsign)
 
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
+		if(errorCode != 0): return(errorCode, callsign)
+
 
 		#Download any new QSLs from LoTW
 		lcd.clear_line(2)
 		lcd.write(2, 0, "LoTW Downloading")
 		errorCode = lotw_download(callsign, lastSyncTime)
 
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
+		if(errorCode != 0): return(errorCode, callsign)
+
 
 		#Upload any new QSOs to Clublog
 		lcd.clear_line(2)
 		lcd.write(2, 1, "Clublog upload")
 		errorCode = clublog_upload(callsign)
 
-		if(errorCode == 0): pass
-		else: return(errorCode, callsign)
+		if(errorCode != 0): return(errorCode, callsign)
+
+
+		#Download any new OQRS request
+		lcd.clear_line(2)
+		lcd.write(2, 0, "OQRS Downloading")
+		errorCode = oqrs_download(callsign, lastSyncTime)
+
+		if(errorCode != 0): return(errorCode, callsign)
 
 	#Save sync time to file
 	syncTime = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
@@ -468,4 +479,4 @@ def fill_my_locator(callsign):
 
 
 if(__name__ == '__main__'):
-	oqrs_download("FP/M0WUT", "1945-01-23 12:34")
+	oqrs_download("M0WUT", "1945-01-23 12:34")
