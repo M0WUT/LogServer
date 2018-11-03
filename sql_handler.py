@@ -54,6 +54,7 @@ def oqrs_download(callsign, lastSyncTime):
 	logbook = adif_to_dictionary(log)
 	errors = 0
 
+
 	for qso in logbook:
 		c.execute("UPDATE log SET QslSent = %s, QslSentVia = %s, QslSDate = %s, Address = %s WHERE `Call` = %s AND Band = %s AND Mode = %s AND QsoDate = %s AND TimeOn LIKE %s", \
 				(qso['qsl_sent'], qso['qsl_sent_via'] if 'qsl_sent_via' in qso else('D' if 'address' in qso else 'B'), \
@@ -67,6 +68,7 @@ def oqrs_download(callsign, lastSyncTime):
 
 	db.commit()
 	db.close()
+	return 0
 
 #Syncs all callsigns in callsigns.callsigns_list()
 #Returns:       0 - Success
@@ -144,25 +146,17 @@ def handle_everything(lcd):
 
 		if(errorCode != 0): return(errorCode, callsign)
 
-
-		#Download any new OQRS request
-		lcd.clear_line(2)
-		lcd.write(2, 0, "OQRS Downloading")
-		errorCode = oqrs_download(callsign, lastSyncTime)
-
-		if(errorCode != 0): return(errorCode, callsign)
-
 	#Save sync time to file
 	syncTime = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
 	returnTime = time.strftime('%d-%m-%Y %H:%M', time.gmtime())
+
+	print("Synchronised at " + syncTime)
 
 	file = open("/home/pi/LogServer/synctime.txt", "w")
 	file.write(syncTime)
 	file.close()
 	lcd.clear()
 	return(0, returnTime)
-
-
 
 #Converts an ADIF file to an array of qsos, with each qso being a dictionary
 def adif_to_dictionary(adif):
@@ -271,11 +265,7 @@ def clublog_upload(callsign):
 	logfile = open ("/tmp/log.adi", "w")
 	logfile.write("<EOH>\r\n")
 	for qso in qsos:
-		#Frequency is specified in kHz.000, ADIF needs MHz with digits below kHz ignored
-		freq = qso[2]
-		freq = freq.split('.')[0] #Seperate off only the whole number of kHz(the bit before the decimal point)
-		freq = freq[:-3] + '.' + freq[-3:]
-		logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <LOTW_QSL_RCVD:1>{} <QSL_SENT:1>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7], qso[8], qso[9]))
+		logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <LOTW_QSL_RCVD:1>{} <QSL_SENT:1>{} <EOR>\r\n".format(qso[0], qso[1], len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7], qso[8], qso[9]))
 	logfile.close()
 
 	#Now have ADIF file ready for upload to Clublog
@@ -288,7 +278,7 @@ def clublog_upload(callsign):
 		print("Uploaded QSOs for {} to Clublog".format(callsign))
 		c.execute("UPDATE log SET ClublogQsoUploadStatus = 'Y' WHERE ClublogQsoUploadStatus = 'N'")
 		db.commit()
-		print("QSOs for {} successfully uploaded to Clublog".format(callsign))
+		print("{} QSOs for {} successfully uploaded to Clublog".format(c.rowcount, callsign))
 		return 0
 	else:
 		print("Clublog Upload for {} failed. Error {}: ".format(callsign, errorCode, request.text))
@@ -349,11 +339,7 @@ def lotw_upload(callsign):
 		logfile = open ("/tmp/log.adi", "w")
 		logfile.write("<EOH>\r\n")
 		for qso in qsos:
-			#Frequency is specified in kHz.000, ADIF needs MHz with digits below kHz ignored
-			freq = qso[2]
-			freq = freq.split('.')[0] #Seperate off only the whole number of kHz(the bit before the decimal point)
-			freq = freq[:-3] + '.' + freq[-3:]
-			logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <FREQ:{}>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <EOR>\r\n".format(qso[0], qso[1], len(freq), freq, len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7]))
+			logfile.write("<QSO_DATE:8>{} <TIME_ON:6>{} <BAND:{}>{} <MODE:{}>{} <CALL:{}>{} <RST_SENT:{}>{} <RST_RCVD:{}>{} <EOR>\r\n".format(qso[0], qso[1], len(qso[3]), qso[3], len(qso[4]), qso[4], len(qso[5]), qso[5], len(qso[6]), qso[6], len(qso[7]), qso[7]))
 		logfile.close()
 
 
@@ -472,6 +458,7 @@ def fill_my_locator(callsign):
 	#Default locator found so update log
 	c.execute("UPDATE log SET MyGridSquare = %s WHERE MyGridSquare = ''", (callsigns.locations[callsign].defaultGridsquare,))
 	if(c.rowcount > 0): print("Blank locators for {} replaced with {}".format(callsign, callsigns.locations[callsign].defaultGridsquare))
+	c.execute("UPDATE log SET ClublogQsoUploadStatus = 'N' WHERE ClublogQsoUploadStatus = ''")
 	db.commit()
 	db.close()
 	return 0
@@ -479,4 +466,4 @@ def fill_my_locator(callsign):
 
 
 if(__name__ == '__main__'):
-	oqrs_download("M0WUT", "1945-01-23 12:34")
+	handle_everything("M0WUT")
