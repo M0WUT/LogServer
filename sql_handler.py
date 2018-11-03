@@ -92,58 +92,35 @@ def oqrs_download(callsign, lastSyncTime):
 #               18 - Callsign not recognised by Clublog
 
 
-def handle_everything(lcd):
+def handle_everything():
 	try:
-		file = open('/home/pi/LogServer/synctime.txt', 'r')
+		file = open('synctime.txt', 'r')
 		lastSyncTime = file.read()
 		file.close()
 	except:
 		lastSyncTime = "1945-01-01 00:00:00"
 
-	lcd.clear()
 	for callsign in callsigns.callsign_list():
 
-		lcd.clear()
-		lcd.write(0,2, "Processing:")
-		lcd.write(1,0, callsign)
-
 		#Fill in any blank dxcc fields
-		lcd.clear_line(2)
-		lcd.write(2, 1, "Checking DXCCs")
 		errorCode = guess_blank_dxcc(callsign)
-
 		if(errorCode != 0): return(errorCode, callsign)
 
 
 		#Fill in any QSO where my locator hasn't been specified with the default from 'callsigns.py'
-		lcd.clear_line(2)
-		lcd.write(2, 0, "Updating locator")
 		errorCode = fill_my_locator(callsign)
-
 		if(errorCode != 0): return(errorCode, callsign)
-
 
 		#Upload any new QSOs to LoTW
-		lcd.clear_line(2)
-		lcd.write(2, 1, "LoTW Uploading")
 		errorCode = lotw_upload(callsign)
-
 		if(errorCode != 0): return(errorCode, callsign)
-
 
 		#Download any new QSLs from LoTW
-		lcd.clear_line(2)
-		lcd.write(2, 0, "LoTW Downloading")
 		errorCode = lotw_download(callsign, lastSyncTime)
-
 		if(errorCode != 0): return(errorCode, callsign)
 
-
 		#Upload any new QSOs to Clublog
-		lcd.clear_line(2)
-		lcd.write(2, 1, "Clublog upload")
 		errorCode = clublog_upload(callsign)
-
 		if(errorCode != 0): return(errorCode, callsign)
 
 	#Save sync time to file
@@ -152,10 +129,9 @@ def handle_everything(lcd):
 
 	print("Synchronised at " + syncTime)
 
-	file = open("/home/pi/LogServer/synctime.txt", "w")
+	file = open("synctime.txt", "w")
 	file.write(syncTime)
 	file.close()
-	lcd.clear()
 	return(0, returnTime)
 
 #Converts an ADIF file to an array of qsos, with each qso being a dictionary
